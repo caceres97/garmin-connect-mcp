@@ -1,6 +1,6 @@
 # garmin-connect-mcp
 
-MCP server for Garmin Connect. Access your fitness, health, and training data from Claude Code, Claude Desktop, Cursor, Windsurf, or any MCP client.
+MCP server for Garmin Connect. Access your fitness, health, and training data from Claude Code, Claude Desktop, Cursor, Windsurf, ChatGPT Developer Mode, or any MCP client.
 
 **61 tools** across 7 categories: activities, daily health, trends, sleep, body composition, performance/training, and profile/devices.
 
@@ -84,7 +84,127 @@ Run the server with environment variables:
 GARMIN_EMAIL=you@email.com GARMIN_PASSWORD=yourpass npx -y @nicolasvegam/garmin-connect-mcp
 ```
 
-The server communicates over stdio using the [Model Context Protocol](https://modelcontextprotocol.io/).
+By default the server runs on stdio for local clients. If `MCP_TRANSPORT=http` is set, or if `PORT`/`MCP_PORT` is present, it runs as a remote Streamable HTTP MCP server.
+
+## Remote MCP for ChatGPT
+
+ChatGPT Developer Mode supports remote MCP servers over Streamable HTTP and SSE. This server now supports remote Streamable HTTP deployments, which makes it usable from ChatGPT when hosted on your own server.
+
+Recommended environment variables for remote deployment without OAuth:
+
+```bash
+GARMIN_EMAIL=you@email.com
+GARMIN_PASSWORD=yourpass
+MCP_TRANSPORT=http
+PORT=3000
+MCP_HOST=0.0.0.0
+MCP_PATH=/mcp-your-secret-path
+```
+
+Use a long random `MCP_PATH` when deploying without OAuth. Example:
+
+```bash
+MCP_PATH=/mcp-4e7dd0d4b6b54f6db9d5f4d1a1fa9f8b
+```
+
+Available HTTP routes:
+
+- `GET /` returns server info
+- `GET /health` returns health status
+- `POST/GET/DELETE {MCP_PATH}` serves the MCP endpoint
+
+The ChatGPT app URL is:
+
+```text
+https://your-domain.com/mcp-your-secret-path
+```
+
+## OAuth for ChatGPT Developer Mode
+
+This server can now expose an OAuth 2.1 authorization server that is compatible with ChatGPT Developer Mode MCP apps.
+
+Enable it with:
+
+```bash
+GARMIN_EMAIL=you@email.com
+GARMIN_PASSWORD=yourpass
+MCP_TRANSPORT=http
+PORT=3000
+MCP_HOST=0.0.0.0
+MCP_PATH=/mcp-your-secret-path
+MCP_PUBLIC_BASE_URL=https://your-domain.com
+MCP_OAUTH_ENABLED=true
+MCP_OAUTH_USERNAME=admin
+MCP_OAUTH_PASSWORD=change-this
+```
+
+When OAuth is enabled, the server exposes:
+
+- `GET/POST /authorize`
+- `POST /token`
+- `POST /register`
+- `POST /revoke`
+- `GET /.well-known/oauth-authorization-server`
+- `GET /.well-known/oauth-protected-resource{MCP_PATH}`
+
+The server advertises support for:
+
+- `mcp:tools`
+- `offline_access`
+
+`offline_access` is important for ChatGPT because it allows refresh tokens to be issued and lets ChatGPT keep the connector working after the original access token expires.
+
+## Deploy on Coolify
+
+This repo now includes a production `Dockerfile`, so Coolify can deploy it directly from Git.
+
+1. Create a new service in Coolify from this repository.
+2. Use the included `Dockerfile`.
+3. Set these environment variables in Coolify:
+   - `GARMIN_EMAIL`
+   - `GARMIN_PASSWORD`
+   - `MCP_TRANSPORT=http`
+   - `PORT=3000`
+   - `MCP_HOST=0.0.0.0`
+   - `MCP_PATH=/mcp-your-secret-path`
+   - `MCP_PUBLIC_BASE_URL=https://your-domain.com`
+4. If you want OAuth in ChatGPT, also set:
+   - `MCP_OAUTH_ENABLED=true`
+   - `MCP_OAUTH_USERNAME`
+   - `MCP_OAUTH_PASSWORD`
+   - `MCP_OAUTH_RESOURCE_NAME=Garmin Connect MCP`
+5. Expose port `3000`.
+6. Set the health check path to `/health`.
+7. Attach your custom domain.
+
+After deploy, verify:
+
+```bash
+curl https://your-domain.com/health
+curl https://your-domain.com/
+curl https://your-domain.com/.well-known/oauth-authorization-server
+```
+
+Then create the ChatGPT app in Developer Mode with the MCP endpoint URL:
+
+```text
+https://your-domain.com/mcp-your-secret-path
+```
+
+Authentication choice in ChatGPT:
+
+- If `MCP_OAUTH_ENABLED=false`, choose `No Authentication`
+- If `MCP_OAUTH_ENABLED=true`, choose `OAuth`
+
+## Security Notes
+
+This server uses one Garmin account configured through environment variables, so a remote deployment is effectively acting on behalf of that account.
+
+- Anyone who can reach your MCP endpoint can use your Garmin tools.
+- With OAuth enabled, anyone who knows your `MCP_OAUTH_USERNAME` and `MCP_OAUTH_PASSWORD` can authorize the connector.
+- If you are deploying this only for yourself, use a private domain and a long unguessable `MCP_PATH`.
+- If you need stronger access control, replace the built-in simple OAuth login with your own IdP or put the service behind an OAuth-capable gateway.
+- OAuth clients, authorization codes, access tokens, and refresh tokens are stored in memory only. Restarting the service invalidates existing sessions and may require reauthorization in ChatGPT.
 
 ## Available Tools
 
@@ -205,10 +325,31 @@ npm install
 npm run build
 ```
 
-To test locally:
+To test locally on stdio:
 
 ```bash
 GARMIN_EMAIL=you@email.com GARMIN_PASSWORD=yourpass npm start
+```
+
+To test locally on remote HTTP:
+
+```bash
+GARMIN_EMAIL=you@email.com GARMIN_PASSWORD=yourpass MCP_TRANSPORT=http PORT=3000 npm start
+```
+
+To test locally on remote HTTP with OAuth:
+
+```bash
+GARMIN_EMAIL=you@email.com \
+GARMIN_PASSWORD=yourpass \
+MCP_TRANSPORT=http \
+PORT=3000 \
+MCP_PATH=/mcp-local \
+MCP_PUBLIC_BASE_URL=http://127.0.0.1:3000 \
+MCP_OAUTH_ENABLED=true \
+MCP_OAUTH_USERNAME=admin \
+MCP_OAUTH_PASSWORD=secret \
+npm start
 ```
 
 ## Credits

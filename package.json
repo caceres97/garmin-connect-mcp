@@ -31,11 +31,13 @@
     "@modelcontextprotocol/sdk": "^1.12.1",
     "axios": "^1.7.9",
     "axios-cookiejar-support": "^5.0.5",
+    "express": "^5.2.1",
     "oauth-1.0a": "^2.2.6",
     "tough-cookie": "^5.1.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^22.13.4",
     "@types/tough-cookie": "^4.0.5",
     "dotenv": "^17.3.1",
