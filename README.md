@@ -136,6 +136,7 @@ MCP_PUBLIC_BASE_URL=https://your-domain.com
 MCP_OAUTH_ENABLED=true
 MCP_OAUTH_USERNAME=admin
 MCP_OAUTH_PASSWORD=change-this
+MCP_OAUTH_STORAGE_PATH=/data/oauth-store.json
 ```
 
 When OAuth is enabled, the server exposes:
@@ -173,9 +174,11 @@ This repo now includes a production `Dockerfile`, so Coolify can deploy it direc
    - `MCP_OAUTH_USERNAME`
    - `MCP_OAUTH_PASSWORD`
    - `MCP_OAUTH_RESOURCE_NAME=Garmin Connect MCP`
+   - `MCP_OAUTH_STORAGE_PATH=/data/oauth-store.json`
 5. Expose port `3000`.
 6. Set the health check path to `/health`.
 7. Attach your custom domain.
+8. Mount a persistent volume on `/data`.
 
 After deploy, verify:
 
@@ -204,7 +207,7 @@ This server uses one Garmin account configured through environment variables, so
 - With OAuth enabled, anyone who knows your `MCP_OAUTH_USERNAME` and `MCP_OAUTH_PASSWORD` can authorize the connector.
 - If you are deploying this only for yourself, use a private domain and a long unguessable `MCP_PATH`.
 - If you need stronger access control, replace the built-in simple OAuth login with your own IdP or put the service behind an OAuth-capable gateway.
-- OAuth clients, authorization codes, access tokens, and refresh tokens are stored in memory only. Restarting the service invalidates existing sessions and may require reauthorization in ChatGPT.
+- OAuth clients, authorization codes, access tokens, and refresh tokens are now stored on disk at `MCP_OAUTH_STORAGE_PATH`. Persist `/data` in Coolify so redeploys do not invalidate the connector.
 
 ## Available Tools
 

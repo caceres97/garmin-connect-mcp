@@ -148,6 +148,7 @@ function buildOAuthConfig(publicBaseUrl: URL | undefined, path: string): OAuthCo
     username,
     password,
     resourceName: process.env.MCP_OAUTH_RESOURCE_NAME?.trim() || 'Garmin Connect MCP',
+    storagePath: process.env.MCP_OAUTH_STORAGE_PATH?.trim() || '/data/oauth-store.json',
     accessTokenTtlSeconds: parseNumberEnv(
       process.env.MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS,
       'MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS',

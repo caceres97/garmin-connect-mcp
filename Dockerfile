@@ -18,12 +18,15 @@ ENV MCP_TRANSPORT=http
 ENV PORT=3000
 ENV MCP_HOST=0.0.0.0
 ENV MCP_PATH=/mcp
+ENV MCP_OAUTH_STORAGE_PATH=/data/oauth-store.json
 
 WORKDIR /app
 
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/build ./build
+
+VOLUME ["/data"]
 
 EXPOSE 3000
 

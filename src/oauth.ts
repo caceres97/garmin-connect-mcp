@@ -1,4 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import express, { type Express, type Response } from 'express';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
@@ -34,6 +36,7 @@ export type OAuthConfigDto = {
   resourceName: string;
   accessTokenTtlSeconds: number;
   refreshTokenTtlSeconds: number;
+  storagePath: string;
 };
 
 type AuthorizationCodeDto = {
@@ -88,35 +91,249 @@ const loginFormSchema = z.object({
   password: z.string().optional(),
 });
 
-class InMemoryClientsStore {
-  private readonly clients = new Map<string, OAuthClientInformationFull>();
+type PersistedAuthorizationCodeDto = Omit<AuthorizationCodeDto, 'resource'> & {
+  resource: string;
+};
+
+type PersistedAccessTokenDto = Omit<AccessTokenDto, 'resource'> & {
+  resource: string;
+};
+
+type PersistedRefreshTokenDto = Omit<RefreshTokenDto, 'resource'> & {
+  resource: string;
+};
+
+type PersistedOAuthStoreDto = {
+  clients: Record<string, OAuthClientInformationFull>;
+  authorizationCodes: Record<string, PersistedAuthorizationCodeDto>;
+  accessTokens: Record<string, PersistedAccessTokenDto>;
+  refreshTokens: Record<string, PersistedRefreshTokenDto>;
+};
+
+const emptyOAuthStore = (): PersistedOAuthStoreDto => ({
+  clients: {},
+  authorizationCodes: {},
+  accessTokens: {},
+  refreshTokens: {},
+});
+
+class FileBackedOAuthStore {
+  constructor(private readonly storagePath: string) {
+    this.ensureStoreFile();
+  }
+
+  getClient(clientId: string): OAuthClientInformationFull | undefined {
+    return this.readStore().clients[clientId];
+  }
+
+  setClient(client: OAuthClientInformationFull): void {
+    const store = this.readStore();
+
+    store.clients[client.client_id] = client;
+    this.writeStore(store);
+  }
+
+  getAuthorizationCode(code: string): AuthorizationCodeDto | undefined {
+    const store = this.readStore();
+    const authorizationCode = store.authorizationCodes[code];
+
+    if (!authorizationCode) {
+      return undefined;
+    }
+
+    if (authorizationCode.expiresAt <= Date.now()) {
+      delete store.authorizationCodes[code];
+      this.writeStore(store);
+      return undefined;
+    }
+
+    return {
+      ...authorizationCode,
+      resource: new URL(authorizationCode.resource),
+    };
+  }
+
+  setAuthorizationCode(code: AuthorizationCodeDto): void {
+    const store = this.readStore();
+
+    store.authorizationCodes[code.code] = {
+      ...code,
+      resource: code.resource.href,
+    };
+    this.writeStore(store);
+  }
+
+  deleteAuthorizationCode(code: string): void {
+    const store = this.readStore();
+
+    delete store.authorizationCodes[code];
+    this.writeStore(store);
+  }
+
+  getAccessToken(token: string): AccessTokenDto | undefined {
+    const store = this.readStore();
+    const accessToken = store.accessTokens[token];
+
+    if (!accessToken) {
+      return undefined;
+    }
+
+    if (accessToken.expiresAt <= Date.now()) {
+      delete store.accessTokens[token];
+      this.writeStore(store);
+      return undefined;
+    }
+
+    return {
+      ...accessToken,
+      resource: new URL(accessToken.resource),
+    };
+  }
+
+  setAccessToken(token: AccessTokenDto): void {
+    const store = this.readStore();
+
+    store.accessTokens[token.token] = {
+      ...token,
+      resource: token.resource.href,
+    };
+    this.writeStore(store);
+  }
+
+  deleteAccessToken(token: string): void {
+    const store = this.readStore();
+
+    delete store.accessTokens[token];
+    this.writeStore(store);
+  }
+
+  getRefreshToken(token: string): RefreshTokenDto | undefined {
+    const store = this.readStore();
+    const refreshToken = store.refreshTokens[token];
+
+    if (!refreshToken) {
+      return undefined;
+    }
+
+    if (refreshToken.expiresAt <= Date.now()) {
+      delete store.refreshTokens[token];
+      this.writeStore(store);
+      return undefined;
+    }
+
+    return {
+      ...refreshToken,
+      resource: new URL(refreshToken.resource),
+    };
+  }
+
+  setRefreshToken(token: RefreshTokenDto): void {
+    const store = this.readStore();
+
+    store.refreshTokens[token.token] = {
+      ...token,
+      resource: token.resource.href,
+    };
+    this.writeStore(store);
+  }
+
+  deleteRefreshToken(token: string): void {
+    const store = this.readStore();
+
+    delete store.refreshTokens[token];
+    this.writeStore(store);
+  }
+
+  private ensureStoreFile(): void {
+    mkdirSync(dirname(this.storagePath), { recursive: true });
+
+    try {
+      this.readStore();
+    } catch {
+      this.writeStore(emptyOAuthStore());
+    }
+  }
+
+  private readStore(): PersistedOAuthStoreDto {
+    const raw = readFileSync(this.storagePath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<PersistedOAuthStoreDto>;
+    const now = Date.now();
+    const store: PersistedOAuthStoreDto = {
+      ...emptyOAuthStore(),
+      ...parsed,
+      clients: parsed.clients ?? {},
+      authorizationCodes: parsed.authorizationCodes ?? {},
+      accessTokens: parsed.accessTokens ?? {},
+      refreshTokens: parsed.refreshTokens ?? {},
+    };
+    let changed = false;
+
+    for (const [key, value] of Object.entries(store.authorizationCodes)) {
+      if (value.expiresAt <= now) {
+        delete store.authorizationCodes[key];
+        changed = true;
+      }
+    }
+
+    for (const [key, value] of Object.entries(store.accessTokens)) {
+      if (value.expiresAt <= now) {
+        delete store.accessTokens[key];
+        changed = true;
+      }
+    }
+
+    for (const [key, value] of Object.entries(store.refreshTokens)) {
+      if (value.expiresAt <= now) {
+        delete store.refreshTokens[key];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.writeStore(store);
+    }
+
+    return store;
+  }
+
+  private writeStore(store: PersistedOAuthStoreDto): void {
+    mkdirSync(dirname(this.storagePath), { recursive: true });
+    const tempPath = `${this.storagePath}.tmp`;
+
+    writeFileSync(tempPath, JSON.stringify(store, null, 2), 'utf8');
+    renameSync(tempPath, this.storagePath);
+  }
+}
+
+class PersistentClientsStore {
+  constructor(private readonly store: FileBackedOAuthStore) {}
 
   async getClient(clientId: string): Promise<OAuthClientInformationFull | undefined> {
-    return this.clients.get(clientId);
+    return this.store.getClient(clientId);
   }
 
   async registerClient(client: OAuthClientInformationFull): Promise<OAuthClientInformationFull> {
-    this.clients.set(client.client_id, client);
+    this.store.setClient(client);
     return client;
   }
 }
 
 class LocalOAuthProvider implements OAuthServerProvider {
-  readonly clientsStore = new InMemoryClientsStore();
-
-  private readonly authorizationCodes = new Map<string, AuthorizationCodeDto>();
-  private readonly accessTokens = new Map<string, AccessTokenDto>();
-  private readonly refreshTokens = new Map<string, RefreshTokenDto>();
+  readonly clientsStore: PersistentClientsStore;
   private readonly allowedScopes = new Set<SupportedScopeDto>(SUPPORTED_SCOPES);
+  private readonly store: FileBackedOAuthStore;
 
-  constructor(private readonly config: OAuthConfigDto) {}
+  constructor(private readonly config: OAuthConfigDto) {
+    this.store = new FileBackedOAuthStore(config.storagePath);
+    this.clientsStore = new PersistentClientsStore(this.store);
+  }
 
   async authorize(_client: OAuthClientInformationFull, _params: AuthorizationParams, _res: Response): Promise<void> {
     throw new ServerError('Authorization must be handled by the interactive login route');
   }
 
   async challengeForAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
-    const code = this.authorizationCodes.get(authorizationCode);
+    const code = this.store.getAuthorizationCode(authorizationCode);
 
     if (!code || code.clientId !== client.client_id || code.expiresAt < Date.now()) {
       throw new InvalidGrantError('Invalid authorization code');
@@ -136,14 +353,14 @@ class LocalOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
-    const code = this.authorizationCodes.get(authorizationCode);
+    const code = this.store.getAuthorizationCode(authorizationCode);
 
     if (!code) {
       throw new InvalidGrantError('Invalid authorization code');
     }
 
     if (code.expiresAt < Date.now()) {
-      this.authorizationCodes.delete(authorizationCode);
+      this.store.deleteAuthorizationCode(authorizationCode);
       throw new InvalidGrantError('Authorization code expired');
     }
 
@@ -171,7 +388,7 @@ class LocalOAuthProvider implements OAuthServerProvider {
       }
     }
 
-    this.authorizationCodes.delete(authorizationCode);
+    this.store.deleteAuthorizationCode(authorizationCode);
 
     return this.issueTokens({
       clientId: client.client_id,
@@ -187,14 +404,14 @@ class LocalOAuthProvider implements OAuthServerProvider {
     scopes?: string[],
     resource?: URL,
   ): Promise<OAuthTokens> {
-    const storedRefreshToken = this.refreshTokens.get(refreshToken);
+    const storedRefreshToken = this.store.getRefreshToken(refreshToken);
 
     if (!storedRefreshToken) {
       throw new InvalidGrantError('Invalid refresh token');
     }
 
     if (storedRefreshToken.expiresAt < Date.now()) {
-      this.refreshTokens.delete(refreshToken);
+      this.store.deleteRefreshToken(refreshToken);
       throw new InvalidGrantError('Refresh token expired');
     }
 
@@ -217,7 +434,7 @@ class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const accessToken = this.accessTokens.get(token);
+    const accessToken = this.store.getAccessToken(token);
 
     if (!accessToken || accessToken.expiresAt < Date.now()) {
       throw new InvalidTokenError('Invalid or expired access token');
@@ -233,16 +450,16 @@ class LocalOAuthProvider implements OAuthServerProvider {
   }
 
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
-    const accessToken = this.accessTokens.get(request.token);
+    const accessToken = this.store.getAccessToken(request.token);
 
     if (accessToken && accessToken.clientId === client.client_id) {
-      this.accessTokens.delete(request.token);
+      this.store.deleteAccessToken(request.token);
     }
 
-    const refreshToken = this.refreshTokens.get(request.token);
+    const refreshToken = this.store.getRefreshToken(request.token);
 
     if (refreshToken && refreshToken.clientId === client.client_id) {
-      this.refreshTokens.delete(request.token);
+      this.store.deleteRefreshToken(request.token);
     }
   }
 
@@ -300,7 +517,7 @@ class LocalOAuthProvider implements OAuthServerProvider {
     const resource = this.resolveResource(input.resource);
     const code = randomUUID();
 
-    this.authorizationCodes.set(code, {
+    this.store.setAuthorizationCode({
       code,
       clientId: input.client.client_id,
       redirectUri: input.redirectUri,
@@ -363,7 +580,7 @@ class LocalOAuthProvider implements OAuthServerProvider {
     const accessToken = randomUUID();
     const accessTokenExpiresAt = Date.now() + this.config.accessTokenTtlSeconds * 1000;
 
-    this.accessTokens.set(accessToken, {
+    this.store.setAccessToken({
       token: accessToken,
       clientId: input.clientId,
       scopes: input.scopes,
@@ -382,7 +599,7 @@ class LocalOAuthProvider implements OAuthServerProvider {
       const refreshToken = randomUUID();
       const refreshTokenExpiresAt = Date.now() + this.config.refreshTokenTtlSeconds * 1000;
 
-      this.refreshTokens.set(refreshToken, {
+      this.store.setRefreshToken({
         token: refreshToken,
         clientId: input.clientId,
         scopes: input.scopes,
