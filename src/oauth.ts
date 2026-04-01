@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import express, { type Express, type Response } from 'express';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
@@ -40,7 +40,7 @@ type AuthorizationCodeDto = {
   code: string;
   clientId: string;
   redirectUri: string;
-  codeChallenge: string;
+  codeChallenge?: string;
   scopes: SupportedScopeDto[];
   resource: URL;
   expiresAt: number;
@@ -66,8 +66,8 @@ type LoginFormDto = {
   client_id: string;
   redirect_uri?: string;
   response_type: 'code';
-  code_challenge: string;
-  code_challenge_method: 'S256';
+  code_challenge?: string;
+  code_challenge_method?: 'S256';
   scope?: string;
   state?: string;
   resource?: string;
@@ -79,8 +79,8 @@ const loginFormSchema = z.object({
   client_id: z.string(),
   redirect_uri: z.string().url().optional(),
   response_type: z.literal('code'),
-  code_challenge: z.string(),
-  code_challenge_method: z.literal('S256'),
+  code_challenge: z.string().optional(),
+  code_challenge_method: z.literal('S256').optional(),
   scope: z.string().optional(),
   state: z.string().optional(),
   resource: z.string().url().optional(),
@@ -122,6 +122,10 @@ class LocalOAuthProvider implements OAuthServerProvider {
       throw new InvalidGrantError('Invalid authorization code');
     }
 
+    if (!code.codeChallenge) {
+      throw new InvalidGrantError('Authorization code does not use PKCE');
+    }
+
     return code.codeChallenge;
   }
 
@@ -153,6 +157,18 @@ class LocalOAuthProvider implements OAuthServerProvider {
 
     if (resource && resource.href !== code.resource.href) {
       throw new InvalidTargetError('Invalid resource');
+    }
+
+    if (code.codeChallenge) {
+      if (!_codeVerifier) {
+        throw new InvalidGrantError('Missing code_verifier');
+      }
+
+      const verifierHash = createCodeChallenge(_codeVerifier);
+
+      if (verifierHash !== code.codeChallenge) {
+        throw new InvalidGrantError('code_verifier does not match the challenge');
+      }
     }
 
     this.authorizationCodes.delete(authorizationCode);
@@ -277,7 +293,7 @@ class LocalOAuthProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull;
     redirectUri: string;
     scope?: string;
-    codeChallenge: string;
+    codeChallenge?: string;
     resource?: string;
   }): { code: string; scopes: SupportedScopeDto[]; resource: URL } {
     const scopes = this.parseScopes(input.scope);
@@ -388,6 +404,50 @@ function escapeHtml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function createCodeChallenge(value: string): string {
+  return createHash('sha256').update(value).digest('base64url');
+}
+
+const tokenRequestSchema = z
+  .object({
+    grant_type: z.enum(['authorization_code', 'refresh_token']),
+    client_id: z.string(),
+    client_secret: z.string().optional(),
+    code: z.string().optional(),
+    code_verifier: z.string().optional(),
+    redirect_uri: z.string().url().optional(),
+    refresh_token: z.string().optional(),
+    resource: z.string().url().optional(),
+    scope: z.string().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.grant_type === 'authorization_code' && !value.code) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['code'],
+        message: 'code is required for authorization_code grant',
+      });
+    }
+
+    if (value.grant_type === 'refresh_token' && !value.refresh_token) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['refresh_token'],
+        message: 'refresh_token is required for refresh_token grant',
+      });
+    }
+  });
+
+function parseTokenRequest(source: unknown) {
+  const parsed = tokenRequestSchema.safeParse(source);
+
+  if (!parsed.success) {
+    throw new InvalidRequestError(parsed.error.message);
+  }
+
+  return parsed.data;
 }
 
 function buildHiddenInput(name: keyof LoginFormDto, value: string | undefined): string {
@@ -635,6 +695,44 @@ export function registerOAuthRoutes(app: Express, config: OAuthConfigDto): Local
         return;
       }
 
+      handleOAuthError(res, error);
+    }
+  });
+
+  app.post('/token', async (req, res) => {
+    try {
+      const request = parseTokenRequest(req.body);
+      const client = await provider.getClient(request.client_id);
+
+      if ((client.token_endpoint_auth_method ?? 'none') !== 'none') {
+        throw new InvalidClientError('Only public OAuth clients are currently supported');
+      }
+
+      if (request.grant_type === 'authorization_code') {
+        const tokens = await provider.exchangeAuthorizationCode(
+          client,
+          request.code as string,
+          request.code_verifier,
+          request.redirect_uri,
+          request.resource ? new URL(request.resource) : undefined,
+        );
+
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(200).json(tokens);
+        return;
+      }
+
+      const scopes = request.scope?.trim() ? request.scope.trim().split(/\s+/) : undefined;
+      const tokens = await provider.exchangeRefreshToken(
+        client,
+        request.refresh_token as string,
+        scopes,
+        request.resource ? new URL(request.resource) : undefined,
+      );
+
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json(tokens);
+    } catch (error) {
       handleOAuthError(res, error);
     }
   });
